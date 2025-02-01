@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode/1.5.1/qrcode.js"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/normalize/8.0.1/normalize.min.css" rel="stylesheet"/>
     <link href="https://fonts.googleapis.com/css2?family=Montserrat:ital,wght@0,100..900;1,100..900&family=Noto+Sans+JP:wght@100..900&display=swap" rel="stylesheet">
@@ -75,6 +75,13 @@
                     </div>
                 </div>
             </form>
+            <div v-if="stage === 'end'" class="form">
+                <h2 class="form-header">{{ title }}</h2>
+                <p v-if="message" style="color: var(--dark-purple); text-align: center; font-size: 20px;">
+                    {{ message }}
+                </p>
+                <button class="form-button" @click="createRoom">Restart</button>
+            </div>
         </div>
     </div>
     <script>
@@ -89,12 +96,16 @@
             const ws = new WebSocket("/connect");
             ws.binaryType = "arraybuffer";
 
-            const listener = (ev) => {
+            ws.onmessage = (ev) => {
                 resolve({ code: ev.data, ws })
-                ws.removeEventListener('message', listener);
+
+                ws.onmessage = null;
+                ws.onclose = null
             };
 
-            ws.addEventListener('message', listener);
+            ws.onclose = ({ code }) => {
+                reject(code);
+            }
         })
 
         /**
@@ -107,6 +118,10 @@
 
             ws.onopen = () => {
                 resolve(ws)
+            }
+
+            ws.error = (error) => {
+                reject(code)
             }
         })
 
@@ -191,86 +206,106 @@
                 return {
                     stage: "init",
                     qrCode: null,
-                    messages: [
-                        { author: "ME", text: "HI" },
-                        { author: "THEM", text: "HI" },
-                        { author: "ME", text: "HI" },
-                        { author: "THEM", text: "HI" },
-                        { author: "ME", text: "HI" },
-                        { author: "THEM", text: "HI" },
-                        { author: "ME", text: "HI" },
-                        { author: "THEM", text: "HI" },
-                        { author: "ME", text: "HI" },
-                        { author: "THEM", text: "HI" },
-                        { author: "ME", text: "HI" },
-                        { author: "THEM", text: "HI" },
-                    ],
-                    input: ""
+                    messages: [],
+                    input: "",
+                    title: "",
+                    message: ""
                 }
             },
             methods: {
                 async createRoom() {
-                    const [{ key, base64 }, { code, ws }] = await Promise.all([
-                        createKey(),
-                        createRoom()
-                    ]);
+                    try {
+                        const [{ key, base64 }, { code, ws }] = await Promise.all([
+                            createKey(),
+                            createRoom()
+                        ]);
 
-                    const url = new URL(location.origin);
-                    url.searchParams.set("code", code);
-                    url.searchParams.set("key", base64);
+                        const url = new URL(location.origin);
+                        url.searchParams.set("code", code);
+                        url.searchParams.set("key", base64);
 
-                    console.log(url.toString());
+                        console.log(url.toString());
 
-                    const qr = await QRCode.toDataURL(url.toString(), {
-                        type: 'image/png',
-                        color: {
-                            dark: "#575068",
-                            light: "#e1d8ef"
+                        const qr = await QRCode.toDataURL(url.toString(), {
+                            type: 'image/png',
+                            color: {
+                                dark: "#575068",
+                                light: "#e1d8ef"
+                            }
+                        });
+
+                        this.qrCode = qr;
+                        this.stage = "invite"
+
+                        ws.onmessage = async (e) => {
+                            try {
+                                const message = await parseMessage(key, e.data);
+                                if(new Uint8Array(message).join("") !== '101') {
+                                    console.error("Fake hello");
+                                    return;
+                                }
+
+                                ws.send(await createMessage(key, Uint8Array.of(1, 0, 1)))
+
+                                ws.onmessage = null;
+                                this.setUpChat(key, ws);
+
+                            } catch(e) {
+                                console.error(e)
+                            }
+                        };
+                    } catch(e) {
+                        if(e === 4001) {
+                            this.stage = "end";
+                            this.title = "Error";
+                            this.message = "No rooms left";
+                        } else {
+                            this.stage = "end";
+                            this.title = "Error";
+                            this.message = "Something went wrong";
                         }
-                    });
+                    }
+                },
+                async connect(code, keyMaterial) {
+                    try {
+                        const [ws, key] = await Promise.all([
+                            connectToRoom(code),
+                            readKey(keyMaterial),
+                        ])
 
-                    this.qrCode = qr;
-                    this.stage = "invite"
-
-                    ws.onmessage = async (e) => {
-                        try {
+                        ws.onmessage = async (e) => {
                             const message = await parseMessage(key, e.data);
+
                             if(new Uint8Array(message).join("") !== '101') {
                                 console.error("Fake hello");
                                 return;
                             }
 
-                            ws.send(await createMessage(key, Uint8Array.of(1, 0, 1)))
-
                             ws.onmessage = null;
+                            ws.onclose = null;
                             this.setUpChat(key, ws);
-
-                        } catch(e) {
-                            console.error(e)
-                        }
-                    };
-                },
-                async connect(code, keyMaterial) {
-                    const [ws, key] = await Promise.all([
-                        connectToRoom(code),
-                        readKey(keyMaterial),
-                    ])
-
-                    ws.onmessage = async (e) => {
-                        const message = await parseMessage(key, e.data);
-
-                        if(new Uint8Array(message).join("") !== '101') {
-                            console.error("Fake hello");
-                            return;
                         }
 
-                        ws.onmessage = null;
-                        this.setUpChat(key, ws);
+                        ws.onclose = ({ code }) => {
+                            this.title = "Error";
+
+                            if(code === 4002) {
+                                this.stage = "end";
+                                this.message = "Room not found";
+                            } else {
+                                this.stage = "end";
+                                this.message = "Something went wrong";
+                            }
+                        }
+
+                        const message = await createMessage(key, Uint8Array.of(1, 0, 1))
+
+                        ws.send(message)
+                    } catch(e) {
+                        this.stage = "end";
+                        this.title = "Error";
+                        this.message = "Something went wrong";
                     }
-
-                    const message = await createMessage(key, Uint8Array.of(1, 0, 1))
-
-                    ws.send(message)
                 },
                 async setUpChat(key, ws) {
                     this.ws = ws;
@@ -283,6 +318,14 @@
                         const message = await parseMessage(key, data);
 
                         this.messages.push({ author: "THEM", text: decoder.decode(message) });
+                    }
+
+                    this.ws.onclose = ({ code }) => {
+                        if(code === 1000) {
+                            this.stage = "end";
+                            this.title = "Chat closed";
+                            this.message = "Other party has left the room";
+                        }
                     }
                 },
                 async sendMessage() {

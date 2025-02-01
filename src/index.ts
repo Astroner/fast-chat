@@ -64,7 +64,6 @@ wss.on('connection', (socket, message) => {
         socket.close(4002); // NO ROOM
         return;
     }
-    rooms.delete(roomCode);
 
     host.removeAllListeners();
 
@@ -75,12 +74,14 @@ wss.on('connection', (socket, message) => {
     clientStream.pipe(hostStream);
 
     host.once('close', () => {
+        rooms.delete(roomCode);
         socket.close(1000);
         hostStream.destroy();
         clientStream.destroy();
     })
 
     socket.once('close', () => {
+        rooms.delete(roomCode);
         host.close(1000);
         hostStream.destroy();
         clientStream.destroy();
