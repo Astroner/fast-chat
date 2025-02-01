@@ -3,3 +3,4 @@ dist/
 Dockerfile
 .gitignore
 .DS_Store
+README.md
