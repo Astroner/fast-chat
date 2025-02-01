@@ -1,5 +1,5 @@
 # Hi there
-This is small application for fast chats(to send something from one device to another for example) with end-to-end encryption
+This is a small application for fast chats(to send something from one device to another for example) with end-to-end encryption
 
 ## Development
 ```sh
@@ -30,5 +30,5 @@ sudo docker run --name fast-chat -d --rm -p 9092:80 fast-chat
 User wants to send some info from phone to PC
  - Open app on PC
  - Scan QR on phone
- - Chat started
+ - Chat starts
  - ...messaging...
