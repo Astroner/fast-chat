@@ -81,12 +81,12 @@
                     </div>
                 </div>
             </form>
-            <div v-if="stage === 'end'" class="form" :style="!end.message && !end.showRestart ? { background: 'transparent' } : undefined">
-                <h2 class="form-header">{{ end.title }}</h2>
-                <p v-if="end.message" style="color: var(--dark-purple); text-align: center; font-size: 20px;">
-                    {{ end.message }}
+            <div v-if="stage === 'popup'" class="form" :style="!popup.message && !popup.showRestart ? { background: 'transparent' } : undefined">
+                <h2 class="form-header">{{ popup.title }}</h2>
+                <p v-if="popup.message" style="color: var(--dark-purple); text-align: center; font-size: 20px;">
+                    {{ popup.message }}
                 </p>
-                <button v-if="end.showRestart" class="form-button" @click="createRoom">Restart</button>
+                <button v-if="popup.showRestart" class="form-button" @click="popup.buttonClickCb">{{ popup.buttonText }}</button>
             </div>
         </div>
     </div>
@@ -243,6 +243,30 @@
                 publicKey: exportedPublicKey
             }
         }
+
+        const deriveAESKey = async (publicKeyBytes, privateKey) => {
+            const theirPublicKey = await crypto.subtle.importKey(
+                "raw", 
+                publicKeyBytes,
+                { name: "ECDH", namedCurve: 'P-256' },
+                false,
+                []
+            )
+
+            return crypto.subtle.deriveKey(
+                {
+                    name: "ECDH",
+                    public: theirPublicKey
+                },
+                privateKey,
+                {
+                    name: 'AES-GCM',
+                    length: 128,
+                },
+                false,
+                ['encrypt', 'decrypt'],
+            )
+        }
     </script>
     <script>
         const app = Vue.createApp({
@@ -254,10 +278,12 @@
                     input: "",
                     relayConnection: false,
                     qrCode: null,
-                    end: {
+                    popup: {
                         title: "",
                         message: "",
-                        showRestart: true
+                        showRestart: true,
+                        buttonText: "Restart",
+                        buttonClickCb: this.createRoom
                     }
                 }
             },
@@ -300,9 +326,7 @@
 
                         this.stage = "invite"
 
-                        const message = await parseMessage(key, await readDataFromWs(ws));
-
-                        const hello = new Uint8Array(message);
+                        const hello = new Uint8Array(await parseMessage(key, await readDataFromWs(ws)));
 
                         if(hello.slice(0, 3).join("") !== '101') {
                             console.error("Fake hello");
@@ -333,9 +357,9 @@
                         ws.send(await createMessage(key, Uint8Array.of(1, 0, 1)))
                     } catch(e) {
                         if(e === 4001) {
-                            this.displayEnd("Error", "No rooms left");
+                            this.displayPopup("Error", "No rooms left");
                         } else {
-                            this.displayEnd("Error", "Something went wrong");
+                            this.displayPopup("Error", "Something went wrong");
                             console.error(e);
                         }
                     }
@@ -359,9 +383,9 @@
                         this.setUpChat(key, ws);
                     } catch(e) {
                         if(e === 4002) {
-                            this.displayEnd("Error", "Room not found");
+                            this.displayPopup("Error", "Room not found");
                         } else {
-                            this.displayEnd("Error", "Something went wrong");
+                            this.displayPopup("Error", "Something went wrong");
                             console.error(e);
                         }
                     }
@@ -378,12 +402,22 @@
                     if(!savedInvite || Date.now() - savedInvite.date > 10 * 60 * 1000) {
                         localStorage.setItem("relayData", JSON.stringify({ code, keyMaterial, date: Date.now() }));
 
-                        this.displayEnd("Relay initiated", "Scan second QR code to connect devices", false);
+                        this.displayPopup(
+                            "Relay initiated", 
+                            "Scan second QR code to connect devices", 
+                            true,
+                            "Cancel",
+                            () => {
+                                localStorage.removeItem("relayData");
+
+                                this.displayPopup("Connection stopped", null, false);
+                            }
+                        );
 
                         return;
                     }
 
-                    this.displayEnd("Connecting devices...", null, false);
+                    this.displayPopup("Connecting devices...", null, false);
 
                     localStorage.removeItem("relayData");
 
@@ -412,13 +446,13 @@
                     ws.send(await createMessage(key, payload.buffer));
                     ws.close();
 
-                    this.displayEnd("Invites are sent", "Check connecting devices", false);
+                    this.displayPopup("Invites are sent", "Check connecting devices", false);
                 },
                 /**
                  * @param {WebSocket} relayWs
                  */
                 async startNegotiation(relayKey, relayWs) {
-                    this.displayEnd("Connecting...", null, false);
+                    this.displayPopup("Connecting...", null, false);
 
                     const targetData = new Uint8Array(await parseMessage(relayKey, await readDataFromWs(relayWs)));
                     if(relayWs.readyState !== relayWs.CLOSED) {
@@ -460,32 +494,12 @@
 
                     const theirPublicKeyBytes = await parseMessage(key, await readDataFromWs(ws));
 
-                    const theirPublicKey = await crypto.subtle.importKey(
-                        "raw", 
-                        theirPublicKeyBytes,
-                        { name: "ECDH", namedCurve: 'P-256' },
-                        false,
-                        []
-                    )
-
-                    const newKey = await crypto.subtle.deriveKey(
-                        {
-                            name: "ECDH",
-                            public: theirPublicKey
-                        },
-                        privateKey,
-                        {
-                            name: 'AES-GCM',
-                            length: 128,
-                        },
-                        false,
-                        ['encrypt', 'decrypt'],
-                    )
+                    const newKey = await deriveAESKey(theirPublicKeyBytes, privateKey);
 
                     this.setUpChat(newKey, ws);
                 },
                 async acceptNegotiation(key, ws) {
-                    this.displayEnd("Connecting...", null, false);
+                    this.displayPopup("Connecting...", null, false);
 
                     const [{ privateKey, publicKey }, theirPublicKeyBytes] = await Promise.all([
                         generateECDH(),
@@ -495,27 +509,7 @@
 
                     ws.send(await createMessage(key, publicKey));
 
-                    const theirPublicKey = await crypto.subtle.importKey(
-                        "raw", 
-                        theirPublicKeyBytes,
-                        { name: "ECDH", namedCurve: 'P-256' },
-                        false,
-                        []
-                    )
-
-                    const newKey = await crypto.subtle.deriveKey(
-                        {
-                            name: "ECDH",
-                            public: theirPublicKey
-                        },
-                        privateKey,
-                        {
-                            name: 'AES-GCM',
-                            length: 128,
-                        },
-                        false,
-                        ['encrypt', 'decrypt'],
-                    )
+                    const newKey = await deriveAESKey(theirPublicKeyBytes, privateKey);
                     
                     this.setUpChat(newKey, ws);
                 },
@@ -534,9 +528,9 @@
 
                     this.ws.onclose = ({ code }) => {
                         if(code === 1000) {
-                            this.displayEnd("Chat closed", "Other party has left the room");
+                            this.displayPopup("Chat closed", "Other party has left the room");
                         } else {
-                            this.displayEnd("Chat closed", "Network error");
+                            this.displayPopup("Chat closed", "Network error");
                         }
                     }
                 },
@@ -550,12 +544,14 @@
 
                     this.input = "";
                 },
-                displayEnd(title, message, showRestart = true) {
-                    this.stage = "end";
+                displayPopup(title, message, showRestart = true, buttonText = "Restart", buttonClickCb = this.createRoom) {
+                    this.stage = "popup";
 
-                    this.end.title = title;
-                    this.end.message = message;
-                    this.end.showRestart = showRestart;
+                    this.popup.title = title;
+                    this.popup.message = message;
+                    this.popup.showRestart = showRestart;
+                    this.popup.buttonText = buttonText;
+                    this.popup.buttonClickCb = buttonClickCb;
                 }
             },
             async mounted() {
