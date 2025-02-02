@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode/1.5.1/qrcode.js"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/normalize/8.0.1/normalize.min.css" rel="stylesheet"/>
     <link href="https://fonts.googleapis.com/css2?family=Montserrat:ital,wght@0,100..900;1,100..900&family=Noto+Sans+JP:wght@100..900&display=swap" rel="stylesheet">
@@ -29,6 +29,7 @@
             display: flex;
             align-items: center;
             justify-content: center;
+            flex-direction: column;
 
             width: 100vw;
             height: 100vh;
@@ -59,9 +60,14 @@
             <div v-if="stage === 'creating'">
                 <h2 class="fade-in" style="color: var(--light-purple); font-size: 32px;">Creating a room</h2>
             </div>
-            <div v-if="stage === 'invite'" class="form">
+            <div v-if="stage === 'invite'" class="form" style="z-index: 1;">
                 <h2 class="form-header">Room QR</h2>
+
                 <img :src="qrCode" style="width: 100%;">
+
+                <div :class="['form', 'relay-container', relayConnection ? 'relay-container--hidden' : 'relay-container--visible']">
+                    <button class="form-button" @click="relayConnection = true">Relay connection</button>
+                </div>
             </div>
             <form v-if="stage === 'chat'" class="form" @submit.prevent="sendMessage">
                 <h2 class="form-header">Chat</h2>
@@ -75,12 +81,12 @@
                     </div>
                 </div>
             </form>
-            <div v-if="stage === 'end'" class="form">
-                <h2 class="form-header">{{ title }}</h2>
-                <p v-if="message" style="color: var(--dark-purple); text-align: center; font-size: 20px;">
-                    {{ message }}
+            <div v-if="stage === 'end'" class="form" :style="!end.message && !end.showRestart ? { background: 'transparent' } : undefined">
+                <h2 class="form-header">{{ end.title }}</h2>
+                <p v-if="end.message" style="color: var(--dark-purple); text-align: center; font-size: 20px;">
+                    {{ end.message }}
                 </p>
-                <button class="form-button" @click="createRoom">Restart</button>
+                <button v-if="end.showRestart" class="form-button" @click="createRoom">Restart</button>
             </div>
         </div>
     </div>
@@ -151,12 +157,18 @@
             reader.readAsDataURL(blob);
         })
 
-        const readKey = async (keyMaterial) => {
-            const dataURL = `data:application/octet-bytes;base64,` + keyMaterial;
+        const decodeBase64 = async (base64) => {
+            const dataURL = `data:application/octet-bytes;base64,` + base64;
 
             const res = await fetch(dataURL);
 
-            const bytes = await res.arrayBuffer()
+            const bytes = await res.arrayBuffer();
+
+            return bytes;
+        }
+
+        const readKey = async (keyMaterial) => {
+            const bytes = await decodeBase64(keyMaterial);
 
             return crypto.subtle.importKey(
                 "raw",
@@ -199,21 +211,81 @@
                 cipherText
             )
         }
+
+        const readDataFromWs = (ws) => new Promise((resolve, reject) => {
+            ws.onmessage = ({ data }) => {
+                resolve(data);
+                ws.onmessage = null;
+                ws.onclose = null;
+            }
+
+            ws.onclose = (code) => {
+                ws.onmessage = null;
+                ws.onclose = null;
+                reject(code)
+            }
+        })
+
+        const generateECDH = async () => {
+            const { privateKey, publicKey } = await crypto.subtle.generateKey(
+                {
+                    name: 'ECDH',
+                    namedCurve: 'P-256',
+                },
+                true,
+                ['deriveKey'],
+            );
+
+            const exportedPublicKey = await crypto.subtle.exportKey("raw", publicKey);
+
+            return {
+                privateKey,
+                publicKey: exportedPublicKey
+            }
+        }
     </script>
     <script>
         const app = Vue.createApp({
             data() {
                 return {
                     stage: "init",
-                    qrCode: null,
+                    baseInviteUrl: null,
                     messages: [],
                     input: "",
-                    title: "",
-                    message: ""
+                    relayConnection: false,
+                    qrCode: null,
+                    end: {
+                        title: "",
+                        message: "",
+                        showRestart: true
+                    }
+                }
+            },
+            computed: {
+                inviteUrl() {
+                    if(this.relayConnection) {
+                        return this.baseInviteUrl + "&relay=true"
+                    }
+
+                    return this.baseInviteUrl;
+                },
+            },
+            watch: {
+                async inviteUrl(url) {
+                    console.log(url);
+
+                    this.qrCode = await QRCode.toDataURL(url, {
+                        type: 'image/png',
+                        color: {
+                            dark: "#575068",
+                            light: "#e1d8ef"
+                        }
+                    });
                 }
             },
             methods: {
                 async createRoom() {
+                    this.relayConnection = false;
                     try {
                         const [{ key, base64 }, { code, ws }] = await Promise.all([
                             createKey(),
@@ -224,45 +296,47 @@
                         url.searchParams.set("code", code);
                         url.searchParams.set("key", base64);
 
-                        console.log(url.toString());
+                        this.baseInviteUrl = url.toString();
 
-                        const qr = await QRCode.toDataURL(url.toString(), {
-                            type: 'image/png',
-                            color: {
-                                dark: "#575068",
-                                light: "#e1d8ef"
-                            }
-                        });
-
-                        this.qrCode = qr;
                         this.stage = "invite"
 
-                        ws.onmessage = async (e) => {
-                            try {
-                                const message = await parseMessage(key, e.data);
-                                if(new Uint8Array(message).join("") !== '101') {
-                                    console.error("Fake hello");
-                                    return;
-                                }
+                        const message = await parseMessage(key, await readDataFromWs(ws));
 
-                                ws.send(await createMessage(key, Uint8Array.of(1, 0, 1)))
+                        const hello = new Uint8Array(message);
 
-                                ws.onmessage = null;
-                                this.setUpChat(key, ws);
+                        if(hello.slice(0, 3).join("") !== '101') {
+                            console.error("Fake hello");
+                            return;
+                        }
 
-                            } catch(e) {
-                                console.error(e)
+                        if(this.relayConnection) {
+                            if(hello.length !== 4) {
+                                console.error("Fake hello");
+                                return;
                             }
-                        };
+
+                            const relayMessageType = hello[3];
+
+                            if(relayMessageType === 0) { // we are to start negotiation
+                                this.startNegotiation(key, ws);
+                            } else { // we are the target of negotiation
+                                this.acceptNegotiation(key, ws);
+                            }
+                        } else {
+                            if(hello.length !== 3) {
+                                console.error("Fake hello");
+                                return;
+                            }
+                            this.setUpChat(key, ws);
+                        }
+
+                        ws.send(await createMessage(key, Uint8Array.of(1, 0, 1)))
                     } catch(e) {
                         if(e === 4001) {
-                            this.stage = "end";
-                            this.title = "Error";
-                            this.message = "No rooms left";
+                            this.displayEnd("Error", "No rooms left");
                         } else {
-                            this.stage = "end";
-                            this.title = "Error";
-                            this.message = "Something went wrong";
+                            this.displayEnd("Error", "Something went wrong");
+                            console.error(e);
                         }
                     }
                 },
@@ -273,39 +347,177 @@
                             readKey(keyMaterial),
                         ])
 
-                        ws.onmessage = async (e) => {
-                            const message = await parseMessage(key, e.data);
+                        ws.send(await createMessage(key, Uint8Array.of(1, 0, 1)))
 
-                            if(new Uint8Array(message).join("") !== '101') {
-                                console.error("Fake hello");
-                                return;
-                            }
+                        const message = await parseMessage(key, await readDataFromWs(ws));
 
-                            ws.onmessage = null;
-                            ws.onclose = null;
-                            this.setUpChat(key, ws);
+                        if(new Uint8Array(message).join("") !== '101') {
+                            console.error("Fake hello");
+                            return;
                         }
 
-                        ws.onclose = ({ code }) => {
-                            this.title = "Error";
-
-                            if(code === 4002) {
-                                this.stage = "end";
-                                this.message = "Room not found";
-                            } else {
-                                this.stage = "end";
-                                this.message = "Something went wrong";
-                            }
-                        }
-
-                        const message = await createMessage(key, Uint8Array.of(1, 0, 1))
-
-                        ws.send(message)
+                        this.setUpChat(key, ws);
                     } catch(e) {
-                        this.stage = "end";
-                        this.title = "Error";
-                        this.message = "Something went wrong";
+                        if(e === 4002) {
+                            this.displayEnd("Error", "Room not found");
+                        } else {
+                            this.displayEnd("Error", "Something went wrong");
+                            console.error(e);
+                        }
                     }
+                },
+                async initRelay(code, keyMaterial) {
+                    let savedInvite;
+
+                    try {
+                        savedInvite = JSON.parse(localStorage.getItem("relayData"));
+                    } catch {
+                        savedInvite = null;
+                    }
+
+                    if(!savedInvite || Date.now() - savedInvite.date > 10 * 60 * 1000) {
+                        localStorage.setItem("relayData", JSON.stringify({ code, keyMaterial, date: Date.now() }));
+
+                        this.displayEnd("Relay initiated", "Scan second QR code to connect devices", false);
+
+                        return;
+                    }
+
+                    this.displayEnd("Connecting devices...", null, false);
+
+                    localStorage.removeItem("relayData");
+
+                    const [ws, key, targetKeyBytes] = await Promise.all([
+                        connectToRoom(code),
+                        readKey(keyMaterial),
+                        decodeBase64(savedInvite.keyMaterial)
+                    ]);
+
+                    const targetRoomCode = encoder.encode(savedInvite.code);
+
+                    ws.send(await createMessage(key, Uint8Array.of(1, 0, 1, 0))); // 0 you are to start the negotiation
+
+                    const message = await parseMessage(key, await readDataFromWs(ws));
+
+                    if(new Uint8Array(message).join("") !== '101') {
+                        console.error("Fake hello");
+                        return;
+                    }
+
+                    const payload = new Uint8Array(targetKeyBytes.byteLength + targetRoomCode.byteLength);
+
+                    payload.set(targetRoomCode);
+                    payload.set(new Uint8Array(targetKeyBytes), targetRoomCode.byteLength);
+
+                    ws.send(await createMessage(key, payload.buffer));
+                    ws.close();
+
+                    this.displayEnd("Invites are sent", "Check connecting devices", false);
+                },
+                /**
+                 * @param {WebSocket} relayWs
+                 */
+                async startNegotiation(relayKey, relayWs) {
+                    this.displayEnd("Connecting...", null, false);
+
+                    const targetData = new Uint8Array(await parseMessage(relayKey, await readDataFromWs(relayWs)));
+                    if(relayWs.readyState !== relayWs.CLOSED) {
+                        relayWs.close();
+                    }
+                    
+                    const code = decoder.decode(targetData.slice(0, 4));
+                    const rawKeyBytes = targetData.slice(4);
+
+                    const ecdhTask = generateECDH();
+
+                    const [ws, key] = await Promise.all([
+                        connectToRoom(code),
+                        crypto.subtle.importKey(
+                            "raw",
+                            rawKeyBytes,
+                            { name: 'AES-GCM', length: 128 },
+                            false,
+                            ['encrypt', 'decrypt'],
+                        )
+                    ])
+
+                    ws.send(await createMessage(key, Uint8Array.of(1, 0, 1, 1))) // 1 for we are starting the negotiation
+
+                    while(true) {
+                        const hello = await parseMessage(key, await readDataFromWs(ws));
+
+                        if(new Uint8Array(hello).join("") !== "101") {
+                            console.error("Fake hello");
+                            continue;
+                        }
+
+                        break;
+                    }
+
+                    const { privateKey, publicKey } = await ecdhTask;
+
+                    ws.send(await createMessage(key, publicKey));
+
+                    const theirPublicKeyBytes = await parseMessage(key, await readDataFromWs(ws));
+
+                    const theirPublicKey = await crypto.subtle.importKey(
+                        "raw", 
+                        theirPublicKeyBytes,
+                        { name: "ECDH", namedCurve: 'P-256' },
+                        false,
+                        []
+                    )
+
+                    const newKey = await crypto.subtle.deriveKey(
+                        {
+                            name: "ECDH",
+                            public: theirPublicKey
+                        },
+                        privateKey,
+                        {
+                            name: 'AES-GCM',
+                            length: 128,
+                        },
+                        false,
+                        ['encrypt', 'decrypt'],
+                    )
+
+                    this.setUpChat(newKey, ws);
+                },
+                async acceptNegotiation(key, ws) {
+                    this.displayEnd("Connecting...", null, false);
+
+                    const [{ privateKey, publicKey }, theirPublicKeyBytes] = await Promise.all([
+                        generateECDH(),
+                        readDataFromWs(ws)
+                            .then(data => parseMessage(key, data))
+                    ]);
+
+                    ws.send(await createMessage(key, publicKey));
+
+                    const theirPublicKey = await crypto.subtle.importKey(
+                        "raw", 
+                        theirPublicKeyBytes,
+                        { name: "ECDH", namedCurve: 'P-256' },
+                        false,
+                        []
+                    )
+
+                    const newKey = await crypto.subtle.deriveKey(
+                        {
+                            name: "ECDH",
+                            public: theirPublicKey
+                        },
+                        privateKey,
+                        {
+                            name: 'AES-GCM',
+                            length: 128,
+                        },
+                        false,
+                        ['encrypt', 'decrypt'],
+                    )
+                    
+                    this.setUpChat(newKey, ws);
                 },
                 async setUpChat(key, ws) {
                     this.ws = ws;
@@ -322,9 +534,9 @@
 
                     this.ws.onclose = ({ code }) => {
                         if(code === 1000) {
-                            this.stage = "end";
-                            this.title = "Chat closed";
-                            this.message = "Other party has left the room";
+                            this.displayEnd("Chat closed", "Other party has left the room");
+                        } else {
+                            this.displayEnd("Chat closed", "Network error");
                         }
                     }
                 },
@@ -337,6 +549,13 @@
                     this.messages.push({ author: "ME", text: this.input });
 
                     this.input = "";
+                },
+                displayEnd(title, message, showRestart = true) {
+                    this.stage = "end";
+
+                    this.end.title = title;
+                    this.end.message = message;
+                    this.end.showRestart = showRestart;
                 }
             },
             async mounted() {
@@ -346,6 +565,7 @@
 
                 const code = searchParams.get("code");
                 const key = searchParams.get("key");
+                const relay = searchParams.get("relay");
 
                 if(!code || !key) {
                     this.stage = 'creating';
@@ -353,7 +573,8 @@
                     return;
                 }
 
-                this.connect(code, key);
+                if(relay) this.initRelay(code, key)
+                else this.connect(code, key);
             }
         })
 
@@ -386,7 +607,7 @@
 
         .form-header {
             position: absolute;
-            bottom: calc(100% + 10px);
+            bottom: calc(100% + 15px);
             left: 0;
 
             width: 100%;
@@ -456,6 +677,78 @@
 
         .form-input:focus {
             border: 2px solid var(--orange);
+        }
+
+        .relay-container {
+            position: absolute;
+            left: 0;
+            top: calc(100% + 10px);
+
+            width: 100%;
+
+            transition: transform .3s, opacity .3s;
+        }
+
+        .relay-container--visible {
+            transform: translateY(0);
+            opacity: 1;
+        }
+
+        .relay-container--hidden {
+            transform: translateY(10px);
+            opacity: 0;
+        }
+
+        .form-checkbox {
+            cursor: pointer;
+
+            display: flex;
+            align-items: center;
+            
+            user-select: none;
+        }
+
+        .form-checkbox input[type="checkbox"] {
+            display: none;
+        }
+
+        .checkbox-view {
+            width: 20px;
+            height: 20px;
+
+            background-color: var(--dark-purple);
+            border-radius: 50%;
+
+            position: relative;
+        }
+
+        .checkbox-view::after {
+            content: "";
+            display: block;
+
+            position: absolute;
+            top: 5px;
+            left: 5px;
+            
+            width: 10px;
+            height: 10px;
+
+            border-radius: 50%;
+
+            background: transparent;
+        }
+
+        input[type="checkbox"]:checked + .checkbox-view::after {
+            background-color: var(--orange);
+        }
+
+        .form-checkbox span {
+            margin-left: 10px;
+
+            color: var(--dark-purple);
+            font-size: 16px;
+
+            padding-bottom: 2px;
         }
 
         .messages {
