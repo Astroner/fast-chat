@@ -1,9 +1,53 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+    <script>
+        /**
+         * @returns {Promise<{ ws: WebSocket, code: string }>}
+         */
+        const createRoom = () => new Promise((resolve, reject) => {
+            const ws = new WebSocket("/connect");
+            ws.binaryType = "arraybuffer";
+
+            ws.onmessage = (ev) => {
+                resolve({ code: ev.data, ws })
+
+                ws.onmessage = null;
+                ws.onclose = null
+            };
+
+            ws.onclose = ({ code }) => {
+                reject(code);
+            }
+        })
+
+        let roomTask = null;
+        
+        const searchParams = new URLSearchParams(location.search);
+        const roomCode = searchParams.get("code");
+        const roomKey = searchParams.get("key");
+        const relayRoom = searchParams.get("relay");
+
+        if(!roomCode || !roomKey) {
+            roomTask = createRoom();
+        } else if(!relayRoom) {
+            roomTask = new Promise((resolve, reject) => {
+                const ws = new WebSocket(`/connect?code=${roomCode}`);
+                ws.binaryType = "arraybuffer";
+
+                ws.onopen = () => {
+                    resolve(ws)
+                }
+
+                ws.error = (error) => {
+                    reject(code)
+                }
+            })
+        }
+    </script>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode/1.5.1/qrcode.js"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/normalize/8.0.1/normalize.min.css" rel="stylesheet"/>
     <link href="https://fonts.googleapis.com/css2?family=Montserrat:ital,wght@0,100..900;1,100..900&family=Noto+Sans+JP:wght@100..900&display=swap" rel="stylesheet">
@@ -86,7 +130,7 @@
                 <p v-if="popup.message" style="color: var(--dark-purple); text-align: center; font-size: 20px;">
                     {{ popup.message }}
                 </p>
-                <button v-if="popup.showRestart" class="form-button" @click="popup.buttonClickCb">{{ popup.buttonText }}</button>
+                <button v-if="popup.showRestart" class="form-button" @click="popup.buttonClickCb()">{{ popup.buttonText }}</button>
             </div>
         </div>
     </div>
@@ -94,42 +138,6 @@
         // Helpers
         const encoder = new TextEncoder();
         const decoder = new TextDecoder();
-
-        /**
-         * @returns {Promise<{ ws: WebSocket, code: string }>}
-         */
-        const createRoom = () => new Promise((resolve, reject) => {
-            const ws = new WebSocket("/connect");
-            ws.binaryType = "arraybuffer";
-
-            ws.onmessage = (ev) => {
-                resolve({ code: ev.data, ws })
-
-                ws.onmessage = null;
-                ws.onclose = null
-            };
-
-            ws.onclose = ({ code }) => {
-                reject(code);
-            }
-        })
-
-        /**
-         * @param {string} code
-         * @returns {Promise<WebSocket>}
-         */
-        const connectToRoom = (code) => new Promise((resolve, reject) => {
-            const ws = new WebSocket(`/connect?code=${code}`);
-            ws.binaryType = "arraybuffer";
-
-            ws.onopen = () => {
-                resolve(ws)
-            }
-
-            ws.error = (error) => {
-                reject(code)
-            }
-        })
 
         /**
          * @returns {Promise<{ key: CryptoKey, base64: string }>}
@@ -310,12 +318,12 @@
                 }
             },
             methods: {
-                async createRoom() {
+                async createRoom(initialTask) {
                     this.relayConnection = false;
                     try {
                         const [{ key, base64 }, { code, ws }] = await Promise.all([
                             createKey(),
-                            createRoom()
+                            initialTask ?? createRoom()
                         ]);
 
                         const url = new URL(location.origin);
@@ -364,10 +372,10 @@
                         }
                     }
                 },
-                async connect(code, keyMaterial) {
+                async connect(roomConnectionTask, keyMaterial) {
                     try {
                         const [ws, key] = await Promise.all([
-                            connectToRoom(code),
+                            roomConnectionTask,
                             readKey(keyMaterial),
                         ])
 
@@ -557,20 +565,14 @@
             async mounted() {
                 document.getElementById('content').style.display = 'flex';
 
-                const searchParams = new URLSearchParams(location.search);
-
-                const code = searchParams.get("code");
-                const key = searchParams.get("key");
-                const relay = searchParams.get("relay");
-
-                if(!code || !key) {
+                if(!roomCode) {
                     this.stage = 'creating';
-                    this.createRoom();
+                    this.createRoom(roomTask);
                     return;
                 }
 
-                if(relay) this.initRelay(code, key)
-                else this.connect(code, key);
+                if(relayRoom) this.initRelay(roomCode, roomKey)
+                else this.connect(roomTask, roomKey);
             }
         })
 
@@ -797,7 +799,7 @@
         }
 
         .message-content {
-            max-width: 60%;
+            max-width: 70%;
 
             padding: 10px 15px;
 
@@ -806,6 +808,8 @@
             box-shadow: 0 4px 0 1px black;
 
             border: 2px solid var(--light-purple);
+
+            word-wrap: break-word;
         }
     </style>
 </body>
