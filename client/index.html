@@ -2,6 +2,9 @@
 <html lang="en">
 <head>
     <script>
+        let BOOKED_CODE; let BOOKING_KEY;
+        // --BOOKING_MARK--
+
         /**
          * @returns {Promise<{ ws: WebSocket, code: string }>}
          */
@@ -21,28 +24,42 @@
             }
         })
 
-        let roomTask = null;
+        /**
+         * @param {string} roomCode
+         * @param {string} [bookingKey]
+         * @returns {Promise<WebSocket>}
+         */
+        const connectToRoom = (roomCode, bookingKey) => new Promise((resolve, reject) => {
+            const ws = new WebSocket(`/connect?code=${roomCode}` + (bookingKey ? `&bookingKey=${bookingKey}` : ""));
+                ws.binaryType = "arraybuffer";
+
+                ws.onopen = () => {
+                    ws.onopen = null;
+                    ws.onerror = null;
+                    resolve(ws)
+                }
+
+                ws.onclose = ({ code }) => {
+                    Object.defineProperty(ws, "closeCode", {
+                        value: code
+                    })
+                }
+
+                ws.onerror = e => {
+                    console.error(e);
+                }
+        })
         
         const searchParams = new URLSearchParams(location.search);
         const roomCode = searchParams.get("code");
         const roomKey = searchParams.get("key");
         const relayRoom = searchParams.get("relay");
-
-        if(!roomCode || !roomKey) {
+        
+        let roomTask;
+        if(roomCode && roomKey && !relayRoom) {
+            roomTask = connectToRoom(roomCode);
+        } else if(!BOOKED_CODE) {
             roomTask = createRoom();
-        } else if(!relayRoom) {
-            roomTask = new Promise((resolve, reject) => {
-                const ws = new WebSocket(`/connect?code=${roomCode}`);
-                ws.binaryType = "arraybuffer";
-
-                ws.onopen = () => {
-                    resolve(ws)
-                }
-
-                ws.error = (error) => {
-                    reject(code)
-                }
-            })
         }
     </script>
     <meta charset="UTF-8">
@@ -319,6 +336,8 @@
             },
             methods: {
                 async createRoom(initialTask) {
+                    this.stage = 'creating';
+
                     this.relayConnection = false;
                     try {
                         const [{ key, base64 }, { code, ws }] = await Promise.all([
@@ -334,35 +353,7 @@
 
                         this.stage = "invite"
 
-                        const hello = new Uint8Array(await parseMessage(key, await readDataFromWs(ws)));
-
-                        if(hello.slice(0, 3).join("") !== '101') {
-                            console.error("Fake hello");
-                            return;
-                        }
-
-                        if(this.relayConnection) {
-                            if(hello.length !== 4) {
-                                console.error("Fake hello");
-                                return;
-                            }
-
-                            const relayMessageType = hello[3];
-
-                            if(relayMessageType === 0) { // we are to start negotiation
-                                this.startNegotiation(key, ws);
-                            } else { // we are the target of negotiation
-                                this.acceptNegotiation(key, ws);
-                            }
-                        } else {
-                            if(hello.length !== 3) {
-                                console.error("Fake hello");
-                                return;
-                            }
-                            this.setUpChat(key, ws);
-                        }
-
-                        ws.send(await createMessage(key, Uint8Array.of(1, 0, 1)))
+                        this.waitForGuest(ws, key);
                     } catch(e) {
                         if(e === 4001) {
                             this.displayPopup("Error", "No rooms left");
@@ -372,12 +363,80 @@
                         }
                     }
                 },
+                async connectBooked(roomCode, bookingKey) {
+                    const connectionTask = connectToRoom(roomCode, bookingKey);
+                    const { base64, key } = await createKey();
+
+                    const url = new URL(location.origin);
+                    url.searchParams.set("code", roomCode);
+                    url.searchParams.set("key", base64);
+
+                    this.baseInviteUrl = url.toString();
+
+                    this.stage = "invite"
+
+                    const ws = await connectionTask;
+
+                    this.waitForGuest(ws, key);
+                },
+                async waitForGuest(ws, key) {
+                    const hello = new Uint8Array(await parseMessage(key, await readDataFromWs(ws)));
+
+                    if(hello.slice(0, 3).join("") !== '101') {
+                        console.error("Fake hello");
+                        return;
+                    }
+
+                    if(this.relayConnection) {
+                        if(hello.length !== 4) {
+                            console.error("Fake hello");
+                            return;
+                        }
+
+                        const relayMessageType = hello[3];
+
+                        if(relayMessageType === 0) { // we are to start negotiation
+                            this.startNegotiation(key, ws);
+                        } else { // we are the target of negotiation
+                            this.acceptNegotiation(key, ws);
+                        }
+                    } else {
+                        if(hello.length !== 3) {
+                            console.error("Fake hello");
+                            return;
+                        }
+                        this.setUpChat(key, ws);
+                    }
+
+                    ws.send(await createMessage(key, Uint8Array.of(1, 0, 1)))
+                },
+                /**
+                 * @param {Promise<WebSocket>} roomConnectionTask
+                 */
                 async connect(roomConnectionTask, keyMaterial) {
                     try {
                         const [ws, key] = await Promise.all([
                             roomConnectionTask,
                             readKey(keyMaterial),
                         ])
+
+                        if(ws.readyState === ws.CLOSED || ws.readyState === ws.CLOSING) {
+                            if(ws.closeCode === 4002) {
+                                this.displayPopup("Error", "Room not found");
+                            } else if(ws.closeCode === 4004) {
+                                this.displayPopup(
+                                    "Error", 
+                                    "Room was not initialized yet", 
+                                    true, 
+                                    "Try again", 
+                                    () => location.reload()
+                                );
+                            } else {
+                                this.displayPopup("Error", "Something went wrong");
+                            }
+
+                            return;
+                        }
 
                         ws.send(await createMessage(key, Uint8Array.of(1, 0, 1)))
 
@@ -390,14 +449,11 @@
 
                         this.setUpChat(key, ws);
                     } catch(e) {
-                        if(e === 4002) {
-                            this.displayPopup("Error", "Room not found");
-                        } else {
-                            this.displayPopup("Error", "Something went wrong");
-                            console.error(e);
-                        }
+                        this.displayPopup("Error", "Something went wrong");
+                        console.error(e);
                     }
                 },
+
                 async initRelay(code, keyMaterial) {
                     let savedInvite;
 
@@ -565,8 +621,12 @@
             async mounted() {
                 document.getElementById('content').style.display = 'flex';
 
+                if(BOOKED_CODE) {
+                    this.connectBooked(BOOKED_CODE, BOOKING_KEY);
+                    return;
+                }
+
                 if(!roomCode) {
-                    this.stage = 'creating';
                     this.createRoom(roomTask);
                     return;
                 }
@@ -589,6 +649,20 @@
             border-radius: 20px;
 
             position: relative;
+
+            animation: slide-in .7s;
+        }
+
+        @keyframes slide-in {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
         }
 
         @media screen and (max-width: 400px) {

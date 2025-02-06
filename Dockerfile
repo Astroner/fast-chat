@@ -7,11 +7,14 @@ COPY package-lock.json .
 
 RUN npm ci
 
-COPY . .
+COPY src src
+COPY tsconfig.json .
 
 RUN npm run build
 
 RUN rm -rf src
+
+COPY client client
 
 ENV PORT=80
 ENV NODE_ENV=PRODUCTION
