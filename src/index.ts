@@ -9,7 +9,7 @@ import { env } from "./env";
 
 const app = express();
 const httpServer = createServer(app);
-const wss = new WebSocketServer({ server: httpServer, path: '/connect' });
+const wss = new WebSocketServer({ server: httpServer, path: '/connect', maxPayload: 1024 * 1024 });
 
 const rooms = new Map<string, WebSocket | string>();
 const bookingTimeouts = new Map<string, NodeJS.Timeout>();

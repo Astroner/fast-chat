@@ -64,7 +64,7 @@
     </script>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode/1.5.1/qrcode.js"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/normalize/8.0.1/normalize.min.css" rel="stylesheet"/>
     <link href="https://fonts.googleapis.com/css2?family=Montserrat:ital,wght@0,100..900;1,100..900&family=Noto+Sans+JP:wght@100..900&display=swap" rel="stylesheet">
@@ -117,7 +117,17 @@
             <h2 class="fade-in" style="color: var(--light-purple); font-size: 32px;">Connecting</h2>
         </div>
 
-        <div id="content" class="container" style="display: none;">
+        <div 
+            id="content" 
+            class="container" 
+            style="display: none;" 
+            @drop.prevent="handleDrop" 
+            @dragover.prevent="showDragArea = true" 
+            @dragleave.self="handleDragLeave"
+        >
+            <div v-if="showDragArea && stage === 'chat'" class="drag-area">
+                Send Files
+            </div>
             <div v-if="stage === 'creating'">
                 <h2 class="fade-in" style="color: var(--light-purple); font-size: 32px;">Creating a room</h2>
             </div>
@@ -132,12 +142,37 @@
             </div>
             <form v-if="stage === 'chat'" class="form" @submit.prevent="sendMessage">
                 <h2 class="form-header">Chat</h2>
-                <input class="form-input" placeholder="Enter message" v-model="input">
+                <div style="display: flex;">
+                    <input class="form-input" placeholder="Enter message" v-model="input" @paste="handlePaste">
+                    <label class="form-button form-file-input">
+                        +
+                        <input type="file" style="display: none;" multiple @change="attachFiles" />
+                    </label>
+                </div>
                 <button class="form-button" style="margin-top: 10px;" type="submit">Send</button>
                 <div class="messages">
-                    <div v-for="message in messages" :class="{ message: true, 'message-me': message.author === 'ME', 'message-them': message.author === 'THEM' }">
-                        <div class="message-content">
+                    <div 
+                        v-for="message in messages" 
+                        :class="{ 
+                            message: true, 
+                            'message-me': message.author === 'ME', 
+                            'message-them': message.author === 'THEM' 
+                        }"
+                    >
+                        <div v-if="message.type === 'text'" class="message-content">
                             {{ message.text }}
+                        </div>
+                        <div v-if="message.type === 'file'" class="message-content">
+                            <div 
+                                v-for="file in message.files" 
+                                @click="file.type === 'RECEIVING' && download(file)" 
+                                class="message-file"
+                                :style="{ cursor: file.type === 'RECEIVING' && !!file.result ? 'pointer' : 'default' }"
+                                :title="file.name"
+                            >
+                                <div class="message-file-name">{{ file.name }}</div>
+                                <div class="message-file-progress">{{ (file.progress * 100).toFixed(2) }}%</div>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -205,11 +240,45 @@
         }
 
         /**
+         * @param {Array<number | Uint8Array | ArrayBuffer>} args
+         * @returns {ArrayBuffer}
+         */
+         const composeBuffer = (...args) => {
+            let size = 0;
+
+            for(const elem of args) {
+                if(typeof elem === "number") {
+                    size += 1;
+                } else {
+                    size += elem.byteLength;
+                }
+            }
+
+            const composed = new Uint8Array(size);
+
+            let offset = 0;
+            for(const elem of args) {
+                if(typeof elem === "number") {
+                    composed[offset] = elem;
+                    offset += 1;
+                } else if(elem instanceof Uint8Array){
+                    composed.set(elem, offset);
+                    offset += elem.byteLength;
+                } else {
+                    composed.set(new Uint8Array(elem), offset);
+                    offset += elem.byteLength;
+                }
+            }
+
+            return composed.buffer;
+        }
+
+        /**
          * @param {CryptoKey} key
          * @param {ArrayBuffer} data
          * @returns {Promise<ArrayBuffer>}
          */
-        const createMessage = async (key, data) => {
+        const encryptPacket = async (key, data) => {
             const iv = crypto.getRandomValues(new Uint8Array(12));
 
             const cipherText = await crypto.subtle.encrypt(
@@ -218,15 +287,10 @@
                 data
             )
 
-            const result = new Uint8Array(iv.byteLength + cipherText.byteLength);
-
-            result.set(iv, 0);
-            result.set(new Uint8Array(cipherText), 12);
-
-            return result.buffer;
+            return composeBuffer(iv, cipherText)
         }
 
-        const parseMessage = async (key, message) => {
+        const decryptPacket = async (key, message) => {
             const iv = message.slice(0, 12);
             const cipherText = message.slice(12);
 
@@ -292,8 +356,107 @@
                 ['encrypt', 'decrypt'],
             )
         }
+
+
+        const canvas = document.createElement("canvas");
+        const ctx = canvas.getContext("2d");
+        const loadImage = (url, type) => new Promise((resolve, reject) => {
+            const img = new Image();
+            img.onload = () => {
+                canvas.width = img.width;
+                canvas.height = img.height;
+
+                ctx.clearRect(0, 0, img.width, img.height);
+
+                ctx.drawImage(img, 0, 0);
+
+                const dataUrl = canvas.toDataURL(type);
+
+                fetch(dataUrl)
+                    .then(r => r.arrayBuffer())
+                    .then(resolve)
+            }
+
+            img.onerror = reject;
+
+            img.src = url;
+        })
     </script>
     <script>
+        /**
+         * @typedef {{
+         *   author: "ME" | "THEM",
+         *   type: "text",
+         *   text: string
+         * }} TextMessage
+         * 
+         * @typedef {{
+         *   author: "ME" | "THEM",
+         *   type: "file",
+         *   caption: string
+         *   files: FileTransferView[],
+         * }} FileMessage
+         * 
+         * @typedef {{
+         *   type: "SENDING" | "RECEIVING",
+         *   name: string,
+         *   groupID: number,
+         *   index: number,
+         *   progress: number
+         *   result: null | {
+         *      type: string,
+         *      url: string
+         *   }
+         * }} FileTransferView
+         * 
+         * 
+         * @typedef Sender
+         * @property {ArrayBuffer} buffer
+         * @property {FileTransferView} view
+         * @property {number} transferred
+         * @property {number} total
+         * @property {number} groupID
+         * @property {number} index
+         * 
+         * @typedef Receiver
+         * @property {Uint8Array} buffer
+         * @property {FileTransferView} view
+         * @property {number} transferred
+         * @property {number} total
+         * @property {number} groupID
+         * @property {number} index
+         * @property {string} type
+         */
+
+        const PACKET_CONFIRM_TIMEOUT = 10000;
+        const NO_CONFIRM = true;
+        const MAX_PACKET_SIZE = 1024 * 1024 / 2
+
+        let idCounter = 0;
+
+        const PACKET_TYPE = {
+            CHAT: 0,
+            CONFIRM: 1,
+            FILE_INIT: 2,
+            FILE_CHUNK: 3,
+            FILE_CANCEL: 4, 
+        }
+
+        /** @type {Map<number, number>} */
+        const confirmTimeouts = new Map();
+
+        /** @type {Map<number, Array<{ index: number, name: string, type: string, content: ArrayBuffer }>} */
+        const awaitingFileTransfers = new Map();
+        
+        /** @type {Map<number, Sender>} */
+        const inProgressSender = new Map();
+
+        /** @type {Map<number, Map<number, Receiver>>} */
+        const activeReceivers = new Map();
+
+        /** @type {Map<number, Map<number, { file: File, url: string }>>} */
+        const filesDB = new Map();
+
         const app = Vue.createApp({
             data() {
                 return {
@@ -309,7 +472,9 @@
                         showRestart: true,
                         buttonText: "Restart",
                         buttonClickCb: this.createRoom
-                    }
+                    },
+                    showDragArea: false,
+                    fileTransfers: [],
                 }
             },
             computed: {
@@ -380,7 +545,7 @@
                     this.waitForGuest(ws, key);
                 },
                 async waitForGuest(ws, key) {
-                    const hello = new Uint8Array(await parseMessage(key, await readDataFromWs(ws)));
+                    const hello = new Uint8Array(await decryptPacket(key, await readDataFromWs(ws)));
 
                     if(hello.slice(0, 3).join("") !== '101') {
                         console.error("Fake hello");
@@ -408,7 +573,7 @@
                         this.setUpChat(key, ws);
                     }
 
-                    ws.send(await createMessage(key, Uint8Array.of(1, 0, 1)))
+                    ws.send(await encryptPacket(key, Uint8Array.of(1, 0, 1)))
                 },
                 /**
                  * @param {Promise<WebSocket>} roomConnectionTask
@@ -438,9 +603,9 @@
                             return;
                         }
 
-                        ws.send(await createMessage(key, Uint8Array.of(1, 0, 1)))
+                        ws.send(await encryptPacket(key, Uint8Array.of(1, 0, 1)))
 
-                        const message = await parseMessage(key, await readDataFromWs(ws));
+                        const message = await decryptPacket(key, await readDataFromWs(ws));
 
                         if(new Uint8Array(message).join("") !== '101') {
                             console.error("Fake hello");
@@ -453,7 +618,6 @@
                         console.error(e);
                     }
                 },
-
                 async initRelay(code, keyMaterial) {
                     let savedInvite;
 
@@ -493,9 +657,9 @@
 
                     const targetRoomCode = encoder.encode(savedInvite.code);
 
-                    ws.send(await createMessage(key, Uint8Array.of(1, 0, 1, 0))); // 0 you are to start the negotiation
+                    ws.send(await encryptPacket(key, Uint8Array.of(1, 0, 1, 0))); // 0 you are to start the negotiation
 
-                    const message = await parseMessage(key, await readDataFromWs(ws));
+                    const message = await decryptPacket(key, await readDataFromWs(ws));
 
                     if(new Uint8Array(message).join("") !== '101') {
                         console.error("Fake hello");
@@ -507,7 +671,7 @@
                     payload.set(targetRoomCode);
                     payload.set(new Uint8Array(targetKeyBytes), targetRoomCode.byteLength);
 
-                    ws.send(await createMessage(key, payload.buffer));
+                    ws.send(await encryptPacket(key, payload.buffer));
                     ws.close();
 
                     this.displayPopup("Invites are sent", "Check connecting devices", false);
@@ -518,7 +682,7 @@
                 async startNegotiation(relayKey, relayWs) {
                     this.displayPopup("Connecting...", null, false);
 
-                    const targetData = new Uint8Array(await parseMessage(relayKey, await readDataFromWs(relayWs)));
+                    const targetData = new Uint8Array(await decryptPacket(relayKey, await readDataFromWs(relayWs)));
                     if(relayWs.readyState !== relayWs.CLOSED) {
                         relayWs.close();
                     }
@@ -539,10 +703,10 @@
                         )
                     ])
 
-                    ws.send(await createMessage(key, Uint8Array.of(1, 0, 1, 1))) // 1 for we are starting the negotiation
+                    ws.send(await encryptPacket(key, Uint8Array.of(1, 0, 1, 1))) // 1 for we are starting the negotiation
 
                     while(true) {
-                        const hello = await parseMessage(key, await readDataFromWs(ws));
+                        const hello = await decryptPacket(key, await readDataFromWs(ws));
 
                         if(new Uint8Array(hello).join("") !== "101") {
                             console.error("Fake hello");
@@ -554,9 +718,9 @@
 
                     const { privateKey, publicKey } = await ecdhTask;
 
-                    ws.send(await createMessage(key, publicKey));
+                    ws.send(await encryptPacket(key, publicKey));
 
-                    const theirPublicKeyBytes = await parseMessage(key, await readDataFromWs(ws));
+                    const theirPublicKeyBytes = await decryptPacket(key, await readDataFromWs(ws));
 
                     const newKey = await deriveAESKey(theirPublicKeyBytes, privateKey);
 
@@ -568,10 +732,10 @@
                     const [{ privateKey, publicKey }, theirPublicKeyBytes] = await Promise.all([
                         generateECDH(),
                         readDataFromWs(ws)
-                            .then(data => parseMessage(key, data))
+                            .then(data => decryptPacket(key, data))
                     ]);
 
-                    ws.send(await createMessage(key, publicKey));
+                    ws.send(await encryptPacket(key, publicKey));
 
                     const newKey = await deriveAESKey(theirPublicKeyBytes, privateKey);
                     
@@ -585,9 +749,103 @@
                     this.stage = "chat";
 
                     this.ws.onmessage = async ({ data }) => {
-                        const message = await parseMessage(key, data);
+                        const packet = await decryptPacket(key, data);
+                        
+                        const packetBody = new Uint8Array(packet.slice(4));
 
-                        this.messages.push({ author: "THEM", text: decoder.decode(message) });
+                        if(packetBody[0] !== PACKET_TYPE.CONFIRM) {
+                            // TODO: later add CONFIRM_CONFIRM
+                            this.sendPacket(PACKET_TYPE.CONFIRM, packet.slice(0, 4), NO_CONFIRM);
+                        }
+
+                        switch(packetBody[0]) {
+                            case PACKET_TYPE.CONFIRM:
+                                const confirmID = new Uint32Array(packet.slice(5), 0, 1)[0];
+                                clearTimeout(confirmTimeouts.get(confirmID));
+                                confirmTimeouts.delete(confirmID);
+
+                                if(awaitingFileTransfers.has(confirmID)) {
+                                    const files = awaitingFileTransfers.get(confirmID);
+                                    awaitingFileTransfers.delete(confirmID);
+                                    this.startTransferringProcess(confirmID, files);
+                                }
+
+                                if(inProgressSender.has(confirmID)) {
+                                    const sender = inProgressSender.get(confirmID);
+                                    inProgressSender.delete(confirmID);
+                                    this.sendNextChunk(sender);
+                                }
+
+                                break;
+
+                            case PACKET_TYPE.CHAT:
+                                /** @type {TextMessage} */
+                                const newMessage = {
+                                    author: "THEM",
+                                    type: "text",
+                                    text: decoder.decode(packetBody.slice(1))
+                                };
+
+                                this.messages.push(newMessage);
+                                break;
+                            
+                            case PACKET_TYPE.FILE_INIT:
+                                // initial packet ID used as group identifier
+                                const groupID = new Uint32Array(packet.slice(0, 4), 0, 1)[0];
+
+                                const files = [];
+                                let offset = 1;
+                                
+                                let index = 0;
+                                while(true) {
+                                    if(offset === packetBody.length) break;
+                                    
+                                    const nameLength = packetBody[offset];
+                                    offset += 1;
+                                    const name = packetBody.slice(offset, offset + nameLength);
+                                    offset += nameLength;
+
+                                    const typeLength = packetBody[offset];
+                                    offset += 1;
+                                    const type = packetBody.slice(offset, offset + typeLength);
+                                    offset += typeLength;
+
+                                    const fileSize = new Uint32Array(packetBody.slice(offset).buffer, 0, 1)
+                                    offset += 4;
+                                    
+                                    files.push({
+                                        index: index++,
+                                        name: decoder.decode(name),
+                                        type: decoder.decode(type),
+                                        size: fileSize[0],
+                                    })
+                                }
+
+                                this.prepareForIncomingFiles(groupID, files);
+
+                                break;
+
+                            case PACKET_TYPE.FILE_CHUNK:
+                                const fileGroup = new Uint32Array(packet.slice(5), 0, 1)[0];
+                                const fileIndex = packetBody[5];
+
+
+                                const receiver = activeReceivers.get(fileGroup)?.get(fileIndex);
+
+                                if(!receiver) {
+                                    console.error(`Unexpected file with group ${fileGroup} and index ${fileIndex}`);
+                                    return;
+                                }
+
+                                const chunk = packetBody.slice(6);
+
+                                this.handleIncomingChunk(receiver, chunk);
+
+                                break;
+                                
+                            default:
+                                console.log("UNKNOWN", packetBody);
+                        }
                     }
 
                     this.ws.onclose = ({ code }) => {
@@ -600,13 +858,36 @@
                 },
                 async sendMessage() {
                     if(!this.input) return;
+                    
+                    this.sendPacket(PACKET_TYPE.CHAT, encoder.encode(this.input));
 
-                    const msg = await createMessage(this.key, encoder.encode(this.input));
-                    this.ws.send(msg);
-
-                    this.messages.push({ author: "ME", text: this.input });
+                    this.messages.push({ author: "ME", type: 'text', text: this.input });
 
                     this.input = "";
+                },
+                /**
+                 * @param {number} packetType
+                 * @param {ArrayBuffer} packetBody 
+                 * @param {boolean} [noConfirm=false]
+                 * @param {number} ID
+                 * @returns {Promise<number>} sent packet ID
+                 */
+                async sendPacket(packetType, packetBody, noConfirm = false, ID = idCounter++) {
+                    const id = Uint32Array.of(ID);
+
+                    this.ws.send(await encryptPacket(this.key, composeBuffer(id.buffer, packetType, packetBody)));
+
+                    if(noConfirm) return ID;
+
+                    confirmTimeouts.set(
+                        ID, 
+                        setTimeout(() => {
+                            confirmTimeouts.delete(id);
+                            this.sendPacket(packetType, packetBody, undefined, ID);
+                        }, PACKET_CONFIRM_TIMEOUT)
+                    )
+
+                    return ID;
                 },
                 displayPopup(title, message, showRestart = true, buttonText = "Restart", buttonClickCb = this.createRoom) {
                     this.stage = "popup";
@@ -616,6 +897,239 @@
                     this.popup.showRestart = showRestart;
                     this.popup.buttonText = buttonText;
                     this.popup.buttonClickCb = buttonClickCb;
+                },
+                /**
+                 * @param {ClipboardEvent} e 
+                 */
+                handlePaste(e) {
+                    if(e.clipboardData.files.length === 0) return;
+                    e.preventDefault();
+                    this.sendFiles(Array.from(e.clipboardData.files));
+                },
+                /**
+                 * @param {DragEvent} e
+                 */
+                async handleDrop(e) {
+                    this.showDragArea = false;
+                    if(this.stage !== "chat") return;
+
+                    this.sendFiles(Array.from(e.dataTransfer.files));
+                },
+                /**
+                 * @param {DragEvent} e
+                 */
+                async handleDragLeave(e) {
+                    if(!e.relatedTarget) this.showDragArea = false;
+                },
+                async sendFiles(filesToSend) {
+                    let currentIndex = 0;
+                    const encodedFiles = [];
+
+                    const files = await Promise.all(
+                        filesToSend
+                            .filter(f => !!f.type)
+                            .map(async (file) => {
+                                const url = URL.createObjectURL(file);
+                                let buffer;
+                                if(file.type.startsWith("image/") && !file.type.endsWith("gif")) {
+                                    buffer = await loadImage(url, file.type);
+                                } else if(file.type.startsWith("text/")) {
+                                    buffer = encoder.encode(await fetch(url).then(r => r.text()));
+                                } else {
+                                    buffer = await fetch(url).then(r => r.arrayBuffer());
+                                }
+
+                                URL.revokeObjectURL(url);
+
+                                encodedFiles.push(file.name.length);
+                                encodedFiles.push(encoder.encode(file.name));
+                                encodedFiles.push(file.type.length);
+                                encodedFiles.push(encoder.encode(file.type));
+                                encodedFiles.push(Uint32Array.of(buffer.byteLength).buffer);
+
+                                return {
+                                    index: currentIndex++,
+                                    name: file.name,
+                                    type: file.type,
+                                    content: buffer
+                                }
+                            })
+                    )
+
+                    const groupID = await this.sendPacket(PACKET_TYPE.FILE_INIT, composeBuffer(...encodedFiles));
+
+                    awaitingFileTransfers.set(groupID, files);
+                },
+                async startTransferringProcess(groupID, files) {
+                    /** @type {FileMessage} */
+                    const originalMessage = {
+                        author: "ME",
+                        caption: "",
+                        type: "file",
+                        files: files.map(file => ({
+                            type: "SENDING",
+                            groupID,
+                            index: file.index,
+                            name: file.name,
+                            progress: 0,
+                        }))
+                    }
+                    this.messages.push(originalMessage);
+
+                    /** @type {FileMessage} */
+                    const messageView = this.messages[this.messages.length - 1];
+
+                    for(let i = 0; i < messageView.files.length; i++) {
+                        const fileView = messageView.files[i];
+                        /** @type {{ content: ArrayBuffer, index: number }} */
+                        const file = files[i];
+
+                        /** @type {Sender} */
+                        const sender = {
+                            buffer: file.content,
+                            view: fileView,
+                            transferred: 0,
+                            total: file.content.byteLength,
+                            groupID,
+                            index: file.index
+                        }
+
+                        this.sendNextChunk(sender);
+                    }
+                },
+                async prepareForIncomingFiles(groupID, files) {
+                    /** @type {FileMessage} */
+                    const originalMessage = {
+                        author: "THEM",
+                        caption: "",
+                        type: "file",
+                        files: files.map(file => ({
+                            type: "RECEIVING",
+                            groupID,
+                            index: file.index,
+                            name: file.name,
+                            progress: 0,
+                        }))
+                    }
+
+                    this.messages.push(originalMessage);
+
+                    /** @type {FileMessage} */
+                    const messageView = this.messages[this.messages.length - 1];
+
+
+                    const groupMap = new Map();
+                    activeReceivers.set(groupID, groupMap);
+
+                    for(let i = 0; i < messageView.files.length; i++) {
+                        const fileView = messageView.files[i];
+                        /** @type {{ index: number, size: number, type: string }} */
+                        const file = files[i];
+
+                        /** @type {Receiver} */
+                        const receiver = {
+                            buffer: new Uint8Array(file.size),
+                            view: fileView,
+                            transferred: 0,
+                            total: file.size,
+                            groupID,
+                            index: file.index,
+                            type: file.type
+                        }
+
+                        groupMap.set(file.index, receiver);
+                    }
+                },
+                /** @param {Sender} sender */
+                async sendNextChunk(sender) {
+                    sender.view.progress = sender.transferred / sender.total;
+
+                    if(sender.transferred === sender.total) {
+                        // TODO: do smth when transferred.
+                        return;
+                    }
+
+                    const chunk = sender.buffer.slice(sender.transferred, sender.transferred + MAX_PACKET_SIZE);
+
+                    let nextTransferred = sender.transferred + MAX_PACKET_SIZE;
+                    if(nextTransferred > sender.total) {
+                        nextTransferred = sender.total;
+                    }
+                    sender.transferred = nextTransferred;
+                    
+                    const packetID = await this.sendPacket(
+                        PACKET_TYPE.FILE_CHUNK, 
+                        composeBuffer(Uint32Array.of(sender.groupID).buffer, sender.index, chunk)
+                    );
+
+                    inProgressSender.set(packetID, sender);
+                },
+                /**
+                 * @param {Receiver} receiver
+                 * @param {Uint8Array} chunk 
+                 */
+                handleIncomingChunk(receiver, chunk) {
+                    receiver.buffer.set(chunk, receiver.transferred);
+
+                    receiver.transferred += chunk.byteLength;
+
+                    receiver.view.progress = receiver.transferred / receiver.total;
+
+                    if(receiver.transferred === receiver.total) {
+                        const group = activeReceivers.get(receiver.groupID);
+                        group.delete(receiver.index);
+                        if(group.size === 0) {
+                            activeReceivers.delete(receiver.groupID);
+                        }
+
+                        const file = new File([receiver.buffer], receiver.view.name, {
+                            type: receiver.type
+                        });
+
+                        const url = URL.createObjectURL(file)
+
+                        let groupDB = filesDB.get(receiver.groupID);
+                        if(!groupDB) {
+                            groupDB = new Map();
+                            filesDB.set(receiver.groupID, groupDB);
+                        }
+
+                        groupDB.set(receiver.index, {
+                            file,
+                            url
+                        })
+
+                        receiver.view.result = {
+                            type: receiver.type,
+                            url
+                        }
+                        
+                        console.log("DONE");
+                        return;
+                    }
+
+                    if(receiver.transferred > receiver.total) {
+                        const group = activeReceivers.get(receiver.groupID);
+                        group.delete(receiver.index);
+                        if(group.size === 0) {
+                            activeReceivers.delete(receiver.groupID);
+                        }
+
+                        console.error("ERROR");
+                        return;
+                    }
+                },
+                /** @param {FileTransferView} file */
+                download(file) {
+                    if(!file.result) return;
+                    const a = document.createElement("a");
+                    a.href = file.result.url;
+                    a.download = file.name;
+                    a.click();
+                },
+                attachFiles(e) {
+                    if(e.target.files.length === 0) return;
+                    this.sendFiles(Array.from(e.target.files));
                 }
             },
             async mounted() {
@@ -639,6 +1153,32 @@
         app.mount("#app")
     </script>
     <style>
+        .drag-area {
+            position: fixed;
+
+            top: 0;
+            left: 0;
+
+            width: 100vw;
+            height: 100vh;
+
+            background-color: rgba(0, 0, 0, .7);
+
+            z-index: 2;
+
+            pointer-events: none;
+
+            display: flex;
+            align-items: center;
+            justify-content: center;
+
+            color: var(--light-purple);
+            font-size: 30px;
+            font-weight: 600;
+
+            animation: slide-in .3s;
+        }
+
         .form {
             background-color: var(--light-purple);
 
@@ -700,7 +1240,6 @@
 
             border: none;
             border-radius: 20px;
-            padding: 0;
 
             text-align: center;
             font-size: 20px;
@@ -729,7 +1268,7 @@
         }
 
         .form-input {
-            width: 100%;
+            width: calc(100% - 57px);
 
             background-color: var(--dark-purple);
 
@@ -749,6 +1288,28 @@
 
         .form-input:focus {
             border: 2px solid var(--orange);
+        }
+
+        .form-file-input {
+            margin-left: 10px;
+
+            height: 47px;
+            width: 47px;
+
+            border-radius: 50%;
+
+            background-color: var(--dark-purple);
+
+            cursor: pointer;
+
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            
+            color: var(--light-purple);
+            font-size: 40px;
+
+            padding: 0 0 5px;
         }
 
         .relay-container {
@@ -884,6 +1445,43 @@
             border: 2px solid var(--light-purple);
 
             word-wrap: break-word;
+        }
+
+        .message-file {
+            padding: 10px 15px;
+
+            border-radius: 13px;
+
+            width: 100%;
+
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+
+            background-color: var(--orange);
+
+            box-shadow: 0 4px 0 1px black;
+
+            transform: translateY(-4px);
+        }
+
+        .message-me .message-file {
+            color: var(--dark-purple);
+        }
+
+        .message-file:not(:first-child) {
+            margin-top: 10px;
+        }
+
+        .message-file-name {
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            overflow: hidden;
+        }
+
+
+        .message-file-progress {
+            margin-left: 10px;
         }
     </style>
 </body>
