@@ -181,14 +181,24 @@
                         </div>
                         <div v-if="message.type === 'file'" class="message-content">
                             <div 
-                                v-for="file in message.files" 
-                                @click="file.type === 'RECEIVING' && download(file)" 
+                                v-for="file in message.files"
+                                @click="file.type === 'RECEIVING' && file.result && handleFileClick(file)" 
                                 class="message-file"
                                 :style="{ cursor: file.type === 'RECEIVING' && !!file.result ? 'pointer' : 'default' }"
                                 :title="file.name"
+                                :draggable="!!file.result"
+                                @dragstart="handleFileDragStart($event, file)"
                             >
-                                <div class="message-file-name">{{ file.name }}</div>
-                                <div class="message-file-progress">{{ (file.progress * 100).toFixed(2) }}%</div>
+                                <img
+                                    v-if="file.result?.type.startsWith('image/')"
+                                    :src="file.result.url"
+                                    style="width: 100%; border-radius: 13px; margin-top: 10px;"
+                                    @load="file.result.image = $event.target"
+                                >
+                                <div class="message-file-name-container">
+                                    <div class="message-file-name">{{ file.name }}</div>
+                                    <div v-if="file.progress < 1" class="message-file-progress">{{ (file.progress * 100).toFixed(2) }}%</div>
+                                </div>
                             </div>
                             <div v-if="message.caption" style="margin-top: 10px;">
                                 {{ message.caption }}
@@ -425,7 +435,8 @@
          *   progress: number
          *   result: null | {
          *      type: string,
-         *      url: string
+         *      url: string,
+         *      image?: HTMLImageElement
          *   }
          * }} FileTransferView
          * 
@@ -1179,13 +1190,23 @@
                     }
                 },
                 /** @param {FileTransferView} file */
-                download(file) {
+                handleFileClick(file) {
                     if(!file.result) return;
                     const a = document.createElement("a");
                     a.href = file.result.url;
                     a.download = file.name;
                     a.click();
                 },
+                /** 
+                 * @param {DragEvent} e 
+                 * @param {FileTransferView} file 
+                 */
+                handleFileDragStart(e, file) {
+                    if(file.result.type.startsWith("image/")) {
+                        e.dataTransfer.setDragImage(file.result.image, file.result.image.width / 2, file.result.image.height / 2);
+                    }
+                    e.dataTransfer.setData('DownloadURL', `${file.result.type}:${file.name}:${file.result.url}`)
+                }
             },
             async mounted() {
                 document.getElementById('content').style.display = 'flex';
@@ -1366,6 +1387,7 @@
 
             font-size: 20px;
             color: var(--orange);
+            line-height: 20px;
 
             padding: 10px 15px;
 
@@ -1540,10 +1562,6 @@
 
             width: 100%;
 
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-
             background-color: var(--orange);
 
             box-shadow: 0 4px 0 1px black;
@@ -1559,6 +1577,14 @@
 
         .message-file:not(:first-child) {
             margin-top: 10px;
+        }
+
+        .message-file-name-container {
+            width: 100%;
+
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
         }
 
         .message-file-name {
