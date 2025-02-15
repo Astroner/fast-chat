@@ -64,7 +64,7 @@
     </script>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode/1.5.1/qrcode.js"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/normalize/8.0.1/normalize.min.css" rel="stylesheet"/>
     <link href="https://fonts.googleapis.com/css2?family=Montserrat:ital,wght@0,100..900;1,100..900&family=Noto+Sans+JP:wght@100..900&display=swap" rel="stylesheet">
@@ -94,6 +94,9 @@
 
             width: 100vw;
             height: 100vh;
+
+            overflow-y: auto;
+            scroll-behavior: smooth;
         }
 
         .fade-in {
@@ -121,6 +124,7 @@
             id="content" 
             class="container" 
             style="display: none;" 
+            :style="{ display: stage === 'chat' ? 'block' : 'flex' }"
             @drop.prevent="handleDrop" 
             @dragover.prevent="showDragArea = true" 
             @dragleave.self="handleDragLeave"
@@ -140,8 +144,7 @@
                     <button class="form-button" @click="relayConnection = true">Relay connection</button>
                 </div>
             </div>
-            <form v-if="stage === 'chat'" class="form" @submit.prevent="sendMessage">
-                <h2 class="form-header">Chat</h2>
+            <form v-if="stage === 'chat'" class="form chat-form" @submit.prevent="sendMessage">
                 <div class="form-files-bucket">
                     <div v-for="file of messageFilesBucket" class="form-file" :title="file.name">
                         <div style="white-space: nowrap; text-overflow: ellipsis; max-width: calc(100% - 25px); overflow: hidden;">
@@ -167,46 +170,47 @@
                     </label>
                 </div>
                 <button class="form-button" style="margin-top: 10px;" type="submit">Send</button>
-                <div class="messages">
-                    <div 
-                        v-for="message in messages" 
-                        :class="{ 
-                            message: true, 
-                            'message-me': message.author === 'ME', 
-                            'message-them': message.author === 'THEM' 
-                        }"
-                    >
-                        <div v-if="message.type === 'text'" class="message-content">
-                            {{ message.text }}
-                        </div>
-                        <div v-if="message.type === 'file'" class="message-content">
-                            <div 
-                                v-for="file in message.files"
-                                @click="file.type === 'RECEIVING' && file.result && handleFileClick(file)" 
-                                class="message-file"
-                                :style="{ cursor: file.type === 'RECEIVING' && !!file.result ? 'pointer' : 'default' }"
-                                :title="file.name"
-                                :draggable="!!file.result"
-                                @dragstart="handleFileDragStart($event, file)"
+            </form>
+            <div v-if="stage === 'chat'" class="messages" >
+                <div 
+                    v-for="message in messages" 
+                    :class="{ 
+                        message: true, 
+                        'message-me': message.author === 'ME', 
+                        'message-them': message.author === 'THEM' 
+                    }"
+                >
+                    <div v-if="message.type === 'text'" class="message-content">
+                        {{ message.text }}
+                    </div>
+                    <div v-if="message.type === 'file'" class="message-content">
+                        <div 
+                            v-for="file in message.files"
+                            @click="file.type === 'RECEIVING' && file.result && handleFileClick(file)" 
+                            class="message-file"
+                            :style="{ cursor: file.type === 'RECEIVING' && !!file.result ? 'pointer' : 'default' }"
+                            :title="file.name"
+                            :draggable="!!file.result"
+                            @dragstart="handleFileDragStart($event, file)"
+                        >
+                            <img
+                                v-if="file.result?.type.startsWith('image/')"
+                                :src="file.result.url"
+                                style="width: 100%; border-radius: 13px; margin-top: 10px;"
+                                @load="file.result.image = $event.target"
                             >
-                                <img
-                                    v-if="file.result?.type.startsWith('image/')"
-                                    :src="file.result.url"
-                                    style="width: 100%; border-radius: 13px; margin-top: 10px;"
-                                    @load="file.result.image = $event.target"
-                                >
-                                <div class="message-file-name-container">
-                                    <div class="message-file-name">{{ file.name }}</div>
-                                    <div v-if="file.progress < 1" class="message-file-progress">{{ (file.progress * 100).toFixed(2) }}%</div>
-                                </div>
+                            <div class="message-file-name-container">
+                                <div class="message-file-name">{{ file.name }}</div>
+                                <div v-if="file.progress < 1" class="message-file-progress">{{ (file.progress * 100).toFixed(2) }}%</div>
                             </div>
-                            <div v-if="message.caption" style="margin-top: 10px;">
-                                {{ message.caption }}
-                            </div>
+                        </div>
+                        <div v-if="message.caption" style="margin-top: 10px;">
+                            {{ message.caption }}
                         </div>
                     </div>
                 </div>
-            </form>
+                <h2 class="form-header chat-header">Chat</h2>
+            </div>
             <div v-if="stage === 'popup'" class="form" :style="!popup.message && !popup.showRestart ? { background: 'transparent' } : undefined">
                 <h2 class="form-header">{{ popup.title }}</h2>
                 <p v-if="popup.message" style="color: var(--dark-purple); text-align: center; font-size: 20px;">
@@ -459,6 +463,8 @@
          * @property {string} type
          */
 
+        const CHAT_DEBUG = false;
+
         const PACKET_CONFIRM_TIMEOUT = 10000;
         const NO_CONFIRM = true;
         const MAX_PACKET_SIZE = 1024 * 1024 / 2
@@ -491,7 +497,7 @@
         const app = Vue.createApp({
             data() {
                 return {
-                    stage: "init",
+                    stage: CHAT_DEBUG ? 'chat' : 'init',
                     baseInviteUrl: null,
                     messages: [],
                     input: "",
@@ -528,6 +534,16 @@
                             light: "#e1d8ef"
                         }
                     });
+                },
+                messages: {
+                    handler() {
+                        setTimeout(() => {
+                            const container = document.getElementById("content");
+
+                            container.scrollTo(0, container.scrollHeight);
+                        }, 0)
+                    },
+                    deep: 1
                 }
             },
             methods: {
@@ -1209,7 +1225,17 @@
                 }
             },
             async mounted() {
-                document.getElementById('content').style.display = 'flex';
+                if(CHAT_DEBUG) {
+                    setInterval(() => {
+                        this.messages.push({
+                            author: "THEM",
+                            type: "text",
+                            text: "holla!"
+                        })
+                    }, 2000);
+
+                    return;
+                }
 
                 if(BOOKED_CODE) {
                     this.connectBooked(BOOKED_CODE, BOOKING_KEY);
@@ -1278,18 +1304,6 @@
             to {
                 opacity: 1;
                 transform: translateY(0);
-            }
-        }
-
-        @media screen and (max-width: 400px) {
-            .form {
-                width: 100vw;
-
-                border-radius: 0;
-            }
-
-            .message {
-                padding: 0 10px;
             }
         }
 
@@ -1374,6 +1388,14 @@
             margin-right: 10px;
         }
 
+        .chat-form {
+            position: fixed; 
+            bottom: calc(50vh - 65px); 
+            left: calc(50vw - 200px); 
+            z-index: 1; 
+            box-shadow: 0 0 20px 20px rgba(0, 0, 0, .3);
+        }
+
         .form-input {
             width: calc(100% - 57px);
 
@@ -1392,6 +1414,10 @@
             padding: 10px 15px;
 
             transition: border .3s;
+        }
+
+        .chat-header {
+            bottom: calc(50vh + 90px);
         }
 
         .form-input:focus {
@@ -1493,10 +1519,19 @@
         }
 
         .messages {
-            position: absolute;
-            width: 100%;
-            left: 0;
-            bottom: calc(100% + 60px);
+            position: relative;
+
+            width: 400px;
+            min-height: 100vh;
+
+            margin-left: calc(50vw - 200px);
+
+            padding-top: 20px;
+            padding-bottom: calc(50vh + 140px);
+
+            display: flex;
+            flex-direction: column;
+            justify-content: flex-end;
         }
 
         .message {
@@ -1596,6 +1631,37 @@
 
         .message-file-progress {
             margin-left: 10px;
+        }
+
+
+
+        @media screen and (max-width: 500px) {
+            .form {
+                width: 100vw;
+
+                border-radius: 0;
+            }
+
+            .chat-form {
+                left: 0;
+                bottom: 0;
+
+                box-shadow: 0 0 10px 10px rgba(0, 0, 0, .3);
+            }
+
+            .chat-header {
+                bottom: 150px;
+            }
+
+            .message {
+                padding: 0 10px;
+            }
+
+            .messages {
+                width: 100vw;
+                margin-left: 0;
+                padding-bottom: 190px;
+            }
         }
     </style>
 </body>
