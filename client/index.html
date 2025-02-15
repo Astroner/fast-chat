@@ -64,7 +64,7 @@
     </script>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode/1.5.1/qrcode.js"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/normalize/8.0.1/normalize.min.css" rel="stylesheet"/>
     <link href="https://fonts.googleapis.com/css2?family=Montserrat:ital,wght@0,100..900;1,100..900&family=Noto+Sans+JP:wght@100..900&display=swap" rel="stylesheet">
@@ -142,6 +142,23 @@
             </div>
             <form v-if="stage === 'chat'" class="form" @submit.prevent="sendMessage">
                 <h2 class="form-header">Chat</h2>
+                <div class="form-files-bucket">
+                    <div v-for="file of messageFilesBucket" class="form-file" :title="file.name">
+                        <div style="white-space: nowrap; text-overflow: ellipsis; max-width: calc(100% - 25px); overflow: hidden;">
+                            {{ file.name }}
+                        </div>
+                        <button
+                            type="button"
+                            class="form-button"
+                            style="width: 20px; height: 20px; padding: 0; margin-left: 5px; font-size: 10px; border: 2px solid var(--dark-purple);"
+                            @click.prevent="messageFilesBucket.delete(file)"
+                        >
+                            <div style="margin-top: -1px;">
+                                &times;
+                            </div>
+                        </button>
+                    </div>
+                </div>
                 <div style="display: flex;">
                     <input class="form-input" placeholder="Enter message" v-model="input" @paste="handlePaste">
                     <label class="form-button form-file-input">
@@ -172,6 +189,9 @@
                             >
                                 <div class="message-file-name">{{ file.name }}</div>
                                 <div class="message-file-progress">{{ (file.progress * 100).toFixed(2) }}%</div>
+                            </div>
+                            <div v-if="message.caption" style="margin-top: 10px;">
+                                {{ message.caption }}
                             </div>
                         </div>
                     </div>
@@ -474,7 +494,7 @@
                         buttonClickCb: this.createRoom
                     },
                     showDragArea: false,
-                    fileTransfers: [],
+                    messageFilesBucket: new Set(),
                 }
             },
             computed: {
@@ -793,8 +813,14 @@
                                 // initial packet ID used as group identifier
                                 const groupID = new Uint32Array(packet.slice(0, 4), 0, 1)[0];
 
-                                const files = [];
                                 let offset = 1;
+                                
+                                const captionLength = new Uint16Array(packetBody.slice(offset), 0, 1)[0];
+                                offset += 2;
+                                const caption = captionLength === 0 ? "" : decoder.decode(packetBody.slice(offset, offset + captionLength));
+                                offset += captionLength;
+
+                                const files = [];
                                 
                                 let index = 0;
                                 while(true) {
@@ -821,7 +847,7 @@
                                     })
                                 }
 
-                                this.prepareForIncomingFiles(groupID, files);
+                                this.prepareForIncomingFiles(groupID, files, caption);
 
                                 break;
 
@@ -857,6 +883,14 @@
                     }
                 },
                 async sendMessage() {
+                    if(this.messageFilesBucket.size > 0) {
+                        this.sendFiles(Array.from(this.messageFilesBucket), this.input);
+
+                        this.input = "";
+                        this.messageFilesBucket.clear();
+                        return
+                    }
+
                     if(!this.input) return;
                     
                     this.sendPacket(PACKET_TYPE.CHAT, encoder.encode(this.input));
@@ -904,7 +938,10 @@
                 handlePaste(e) {
                     if(e.clipboardData.files.length === 0) return;
                     e.preventDefault();
-                    this.sendFiles(Array.from(e.clipboardData.files));
+                    
+                    for(const file of e.clipboardData.files) {
+                        this.messageFilesBucket.add(file);
+                    }
                 },
                 /**
                  * @param {DragEvent} e
@@ -912,18 +949,35 @@
                 async handleDrop(e) {
                     this.showDragArea = false;
                     if(this.stage !== "chat") return;
-
-                    this.sendFiles(Array.from(e.dataTransfer.files));
+                    for(const file of e.dataTransfer.files) {
+                        this.messageFilesBucket.add(file);
+                    }
                 },
                 /**
                  * @param {DragEvent} e
                  */
+                attachFiles(e) {
+                    if(e.target.files.length === 0) return;
+                    for(const file of e.target.files) {
+                        this.messageFilesBucket.add(file);
+                    }
+                },
                 async handleDragLeave(e) {
                     if(!e.relatedTarget) this.showDragArea = false;
                 },
-                async sendFiles(filesToSend) {
-                    let currentIndex = 0;
+                async sendFiles(filesToSend, caption = "") {
                     const encodedFiles = [];
+
+                    if(caption) {
+                        const encodedCaption = encoder.encode(caption);
+                        encodedFiles.push(Uint16Array.of(encodedCaption.length).buffer);
+                        encodedFiles.push(encodedCaption);
+                    } else {
+                        encodedFiles.push(0);
+                        encodedFiles.push(0);
+                    }
+
+                    let currentIndex = 0;
 
                     const files = await Promise.all(
                         filesToSend
@@ -941,10 +995,13 @@
 
                                 URL.revokeObjectURL(url);
 
-                                encodedFiles.push(file.name.length);
-                                encodedFiles.push(encoder.encode(file.name));
-                                encodedFiles.push(file.type.length);
-                                encodedFiles.push(encoder.encode(file.type));
+                                const encodedName = encoder.encode(file.name);
+                                const encodedType = encoder.encode(file.type);
+
+                                encodedFiles.push(encodedName.length);
+                                encodedFiles.push(encodedName);
+                                encodedFiles.push(encodedType.length);
+                                encodedFiles.push(encodedType);
                                 encodedFiles.push(Uint32Array.of(buffer.byteLength).buffer);
 
                                 return {
@@ -958,13 +1015,16 @@
 
                     const groupID = await this.sendPacket(PACKET_TYPE.FILE_INIT, composeBuffer(...encodedFiles));
 
-                    awaitingFileTransfers.set(groupID, files);
+                    awaitingFileTransfers.set(groupID, {
+                        files,
+                        caption
+                    });
                 },
-                async startTransferringProcess(groupID, files) {
+                async startTransferringProcess(groupID, { files, caption }) {
                     /** @type {FileMessage} */
                     const originalMessage = {
                         author: "ME",
-                        caption: "",
+                        caption,
                         type: "file",
                         files: files.map(file => ({
                             type: "SENDING",
@@ -997,11 +1057,11 @@
                         this.sendNextChunk(sender);
                     }
                 },
-                async prepareForIncomingFiles(groupID, files) {
+                async prepareForIncomingFiles(groupID, files, caption = "") {
                     /** @type {FileMessage} */
                     const originalMessage = {
                         author: "THEM",
-                        caption: "",
+                        caption,
                         type: "file",
                         files: files.map(file => ({
                             type: "RECEIVING",
@@ -1103,8 +1163,7 @@
                             type: receiver.type,
                             url
                         }
-                        
-                        console.log("DONE");
+
                         return;
                     }
 
@@ -1127,10 +1186,6 @@
                     a.download = file.name;
                     a.click();
                 },
-                attachFiles(e) {
-                    if(e.target.files.length === 0) return;
-                    this.sendFiles(Array.from(e.target.files));
-                }
             },
             async mounted() {
                 document.getElementById('content').style.display = 'flex';
@@ -1265,6 +1320,37 @@
             color: var(--dark-purple);
             transform: translateY(0px);
             box-shadow: 0 0 0 var(--dark-purple);
+        }
+
+        .form-files-bucket {
+            display: flex;
+            flex-wrap: wrap;
+        }
+
+        .form-file {
+            max-width: 100%;
+
+            padding: 5px 10px;
+
+            background: var(--orange);
+
+            color: var(--dark-purple);
+            line-height: 24px;
+
+            border-radius: 13px;
+
+            margin-bottom: 10px;
+
+            display: flex;
+            align-items: center;
+
+            box-shadow: 0 4px 0 1px black;
+
+            transform: translateY(-4px);
+        }
+
+        .form-file:not(:last-child) {
+            margin-right: 10px;
         }
 
         .form-input {
@@ -1448,7 +1534,7 @@
         }
 
         .message-file {
-            padding: 10px 15px;
+            padding: 5px 15px;
 
             border-radius: 13px;
 
@@ -1463,6 +1549,8 @@
             box-shadow: 0 4px 0 1px black;
 
             transform: translateY(-4px);
+
+            line-height: 24px;
         }
 
         .message-me .message-file {
